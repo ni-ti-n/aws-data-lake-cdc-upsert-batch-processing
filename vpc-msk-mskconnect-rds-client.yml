@@ -1,0 +1,1195 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+AWSTemplateFormatVersion: '2010-09-09'
+Parameters:
+  EnvironmentName:
+    Description: An environment name that is prefixed to resource names.
+    Type: String
+    Default: msk-delta-cdc-pipeline
+  DatabasePassword:
+    NoEcho: true
+    AllowedPattern: '[a-zA-Z0-9]+'
+    ConstraintDescription: must contain only alphanumeric characters. Must have length 8-41.
+    Description: Database admin account password.
+    MaxLength: '41'
+    MinLength: '8'
+    Type: String
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Description: Latest AMI ID of Amazon Linux 2023 for ec2 instance. You can use the
+      default value.
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
+  InstanceType:
+    Description: MSK client EC2 instance type.
+    Type: String
+    Default: t2.micro
+    AllowedValues:
+      - t2.nano
+      - t2.micro
+      - t2.small
+      - t3.nano
+      - t3.micro
+      - t3.small
+    ConstraintDescription: must be a valid EC2 instance type.
+  VpcCIDR:
+    Description: Please enter the IP range (CIDR notation) for this VPC
+    Type: String
+    Default: 10.192.0.0/16
+
+  PublicSubnet1CIDR:
+    Description: Please enter the IP range (CIDR notation) for the public subnet in the first Availability Zone
+    Type: String
+    Default: 10.192.10.0/24
+
+  PublicSubnet2CIDR:
+    Description: Please enter the IP range (CIDR notation) for the public subnet in the second Availability Zone
+    Type: String
+    Default: 10.192.11.0/24
+
+  PrivateSubnet1CIDR:
+    Description: Please enter the IP range (CIDR notation) for the private subnet in the first Availability Zone
+    Type: String
+    Default: 10.192.20.0/24
+
+  PrivateSubnet2CIDR:
+    Description: Please enter the IP range (CIDR notation) for the private subnet in the second Availability Zone
+    Type: String
+    Default: 10.192.21.0/24
+
+  PrivateSubnet3CIDR:
+    Description: Please enter the IP range (CIDR notation) for the private subnet in the third Availability Zone
+    Type: String
+    Default: 10.192.22.0/24
+
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      CidrBlock: !Ref VpcCIDR
+      Tags:
+        - Key: Name
+          Value: BlogVPC
+
+  PublicSubnetOne:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select
+        - 0
+        - !GetAZs
+          Ref: AWS::Region
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PublicSubnet1CIDR
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: PublicSubnetOne
+  PublicSubnetTwo:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select
+        - 1
+        - !GetAZs
+          Ref: AWS::Region
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PublicSubnet2CIDR
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: PublicSubnetTwo
+  PrivateSubnetMSKOne:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select
+        - 0
+        - !GetAZs
+          Ref: AWS::Region
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PrivateSubnet1CIDR
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: PrivateSubnetMSKOne
+  PrivateSubnetMSKTwo:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select
+        - 1
+        - !GetAZs
+          Ref: AWS::Region
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PrivateSubnet2CIDR
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: PrivateSubnetMSKTwo
+  PrivateSubnetMSKThree:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select
+        - 2
+        - !GetAZs
+          Ref: AWS::Region
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PrivateSubnet3CIDR
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: PrivateSubnetMSKThree
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+  GatewayAttachement:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+  NatGateway1EIP:
+    Type: AWS::EC2::EIP
+    DependsOn: GatewayAttachement
+    Properties:
+      Domain: vpc
+  NATGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGateway1EIP.AllocationId
+      SubnetId: !Ref PublicSubnetOne
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: GatewayAttachement
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+  PublicSubnetOneRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetOne
+      RouteTableId: !Ref PublicRouteTable
+  PublicSubnetTwoRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetTwo
+      RouteTableId: !Ref PublicRouteTable
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+  PrivateInternetRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGateway
+  PrivateSubnetMSKOneRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnetMSKOne
+  PrivateSubnetMSKTwoRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnetMSKTwo
+  PrivateSubnetMSKThreeRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnetMSKThree
+
+  KafkaClientInstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: EC2 Kafka Client Security Group.
+      VpcId: !Ref VPC
+
+  MSKSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: MSK Security Group
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 2181
+          ToPort: 2181
+          SourceSecurityGroupId: !GetAtt KafkaClientInstanceSecurityGroup.GroupId
+        - IpProtocol: tcp
+          FromPort: 9098
+          ToPort: 9098
+          SourceSecurityGroupId: !GetAtt KafkaClientInstanceSecurityGroup.GroupId
+        - IpProtocol: tcp
+          FromPort: 9094
+          ToPort: 9094
+          SourceSecurityGroupId: !GetAtt KafkaClientInstanceSecurityGroup.GroupId
+        - IpProtocol: tcp
+          FromPort: 9092
+          ToPort: 9092
+          SourceSecurityGroupId: !GetAtt KafkaClientInstanceSecurityGroup.GroupId
+  MSKSelfIngressAllowRule:
+    Type: AWS::EC2::SecurityGroupIngress
+    DependsOn: MSKSecurityGroup
+    Properties:
+      GroupId: !Ref MSKSecurityGroup
+      IpProtocol: tcp
+      FromPort: 0
+      ToPort: 65535
+      SourceSecurityGroupId: !Ref MSKSecurityGroup
+
+  AuroraDBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: AuroraDBSecurityGroup
+      GroupDescription: Aurora Database Security Group
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !GetAtt KafkaClientInstanceSecurityGroup.GroupId
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !GetAtt MSKSecurityGroup.GroupId
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  KafkaClientEC2Instance:
+    Type: AWS::EC2::Instance
+    DependsOn: S3BucketInputBlog
+    Properties:
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      AvailabilityZone: !Select
+        - 0
+        - !GetAZs
+          Ref: AWS::Region
+      SubnetId: !Ref PublicSubnetOne
+      SecurityGroupIds:
+        - !GetAtt KafkaClientInstanceSecurityGroup.GroupId
+      ImageId: !Ref LatestAmiId
+      Tags:
+        - Key: Name
+          Value: KafkaClientInstance
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 20
+            VolumeType: gp2
+            DeleteOnTermination: true
+      UserData: !Base64
+        Fn::Sub: |
+          #!/bin/bash
+          set -e
+          yum install java-22-amazon-corretto.x86_64 -y
+          yum install jq -y
+          sudo yum install -y mariadb105-devel.x86_64
+          sudo yum -y install mariadb105-server-utils.x86_64
+          cd /home/ec2-user
+          su -c "mkdir -p kafka" -s /bin/sh ec2-user
+          cd kafka
+          su -c "wget https://archive.apache.org/dist/kafka/2.3.1/kafka_2.12-2.3.1.tgz" -s /bin/sh ec2-user
+          su -c "tar -xzf kafka_2.12-2.3.1.tgz --strip 1" -s /bin/sh ec2-user
+          cd libs
+          wget https://github.com/aws/aws-msk-iam-auth/releases/download/1.1.0/aws-msk-iam-auth-1.1.0-all.jar
+          cd ../config
+          echo "security.protocol=SASL_SSL" | sudo tee -a client.properties
+          echo "sasl.mechanism=AWS_MSK_IAM" | sudo tee -a client.properties
+          echo "sasl.jaas.config=software.amazon.msk.auth.iam.IAMLoginModule required;" | sudo tee -a client.properties
+          echo "sasl.client.callback.handler.class=software.amazon.msk.auth.iam.IAMClientCallbackHandler" | sudo tee -a client.properties
+          cd /home/ec2-user
+          mkdir debezium && cd debezium
+          wget https://repo1.maven.org/maven2/io/debezium/debezium-connector-mysql/2.0.1.Final/debezium-connector-mysql-2.0.1.Final-plugin.tar.gz
+          tar xzf debezium-connector-mysql-2.0.1.Final-plugin.tar.gz
+          cd debezium-connector-mysql
+          zip -9 ../debezium-connector-mysql-2.0.1.Final-plugin.zip *
+          cd ..
+          aws s3 cp ./debezium-connector-mysql-2.0.1.Final-plugin.zip s3://msk-lab-${AWS::AccountId}-plugins-bucket/debezium/
+          cd /home/ec2-user
+          mkdir kafka-connect-s3 && cd kafka-connect-s3
+          wget https://aws-blogs-artifacts-public.s3.amazonaws.com/artifacts/BDB-3813/confluentinc-kafka-connect-s3-10.0.3.zip
+          aws s3 cp ./confluentinc-kafka-connect-s3-10.0.3.zip s3://msk-lab-${AWS::AccountId}-plugins-bucket/kafka-connect-s3/
+          aws s3 cp s3://aws-blogs-artifacts-public/artifacts/BDB-3813/mskdebeziumcdcglueetl.py s3://aws-gluescript-${AWS::AccountId}-${AWS::Region}-${EnvironmentName}/gluejobscript/
+          aws rds wait db-instance-available --db-instance-identifier blog-msk-salesdb
+          RDS_AURORA_ENDPOINT=`aws rds describe-db-instances --region ${AWS::Region} | jq -r '.DBInstances[] | select(.DBName == "salesdb") | .Endpoint.Address'`
+          echo 'aurora_endpoint : '$RDS_AURORA_ENDPOINT
+          cd /home/ec2-user
+          # Load the data into Aurora
+          mkdir scripts && cd scripts
+          aws s3 cp s3://aws-blogs-artifacts-public/artifacts/BDB-3813/customer.sql /home/ec2-user/scripts/
+          su -c "mysql -f -u master -h $RDS_AURORA_ENDPOINT  --password=${DatabasePassword} < /home/ec2-user/scripts/customer.sql" -l ec2-user
+  EC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: ''
+            Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSCloudFormationReadOnlyAccess
+        - arn:aws:iam::aws:policy/AmazonRDSReadOnlyAccess
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: MSKConfigurationAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Effect: Allow
+              Action:
+              - kafka:CreateConfiguration
+              Resource: "*"
+        - PolicyName: AllowS3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Effect: Allow
+              Action:
+              - s3:ListBucket
+              - s3:ListBuckets
+              Resource:
+              - !Join
+                - ''
+                - - 'arn:aws:s3:::'
+                  - !Ref S3ConnectorPluginsBucket
+              - !Join
+                - ''
+                - - 'arn:aws:s3:::'
+                  - !Ref S3ConnectorTargetBucket
+              - !Join
+                - ''
+                - - 'arn:aws:s3:::'
+                  - !Ref S3BucketInputBlog
+            - Effect: Allow
+              Action:
+              - s3:PutObject
+              - s3:GetObject
+              - s3:DeleteObject
+              Resource:
+              - !Join
+                - ''
+                - - 'arn:aws:s3:::'
+                  - !Ref S3ConnectorPluginsBucket
+                  - /*
+              - !Join
+                - ''
+                - - 'arn:aws:s3:::'
+                  - !Ref S3ConnectorTargetBucket
+                  - /*
+              - !Join
+                - ''
+                - - 'arn:aws:s3:::'
+                  - !Ref S3BucketInputBlog
+                  - /*
+            - Effect: Allow
+              Action:
+              - s3:GetObject
+              Resource:
+              - arn:aws:s3:::aws-streaming-artifacts/*
+              - arn:aws:s3:::emr-workshops-us-west-2/*
+              - arn:aws:s3:::aws-blogs-artifacts-public/artifacts/BDB-3813/mskdebeziumcdcglueetl.py
+              - arn:aws:s3:::aws-blogs-artifacts-public/artifacts/BDB-3813/customer.sql
+        - PolicyName: MSKConnectAuthentication
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Effect: Allow
+              Action:
+              - kafka-cluster:*Topic*
+              - kafka-cluster:Connect
+              - kafka-cluster:AlterCluster
+              - kafka-cluster:DescribeCluster
+              - kafka-cluster:DescribeClusterDynamicConfiguration
+              Resource:
+              - !Sub 'arn:aws:kafka:${AWS::Region}:${AWS::AccountId}:cluster/MSKCluster-${AWS::StackName}/*'
+            - Effect: Allow
+              Action:
+              - kafka-cluster:*Topic*
+              - kafka-cluster:WriteData
+              - kafka-cluster:ReadData
+              Resource:
+              - !Sub 'arn:aws:kafka:${AWS::Region}:${AWS::AccountId}:topic/MSKCluster-${AWS::StackName}/*'
+            - Effect: Allow
+              Action:
+              - kafka-cluster:AlterGroup
+              - kafka-cluster:DescribeGroup
+              Resource:
+              - !Sub 'arn:aws:kafka:${AWS::Region}:${AWS::AccountId}:group/MSKCluster-${AWS::StackName}/*'
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Join
+        - '-'
+        - - EC2MSKCFProfile
+          - !Ref AWS::StackName
+      Roles:
+        - !Ref EC2Role
+  ConnectSourceCWGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /msk-lab-source-aurora-connector
+      RetentionInDays: 3
+  ConnectTargetCWGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /msk-lab-target-s3sink-connector
+      RetentionInDays: 3
+  S3ConnectorTargetBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub msk-lab-${AWS::AccountId}-target-bucket
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Name
+          Value: !Ref EnvironmentName
+  S3ConnectorPluginsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub msk-lab-${AWS::AccountId}-plugins-bucket
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Name
+          Value: !Ref EnvironmentName
+  S3BucketOutputBlog:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub aws-glueoutput-${AWS::AccountId}-${AWS::Region}-${EnvironmentName}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Name
+          Value: !Ref EnvironmentName
+  S3BucketInputBlog:
+    Type: AWS::S3::Bucket
+    DependsOn: S3ConnectorPluginsBucket
+    Properties:
+      BucketName: !Sub aws-gluescript-${AWS::AccountId}-${AWS::Region}-${EnvironmentName}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Name
+          Value: !Ref EnvironmentName
+  AuroraConnectorIAMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: ''
+            Effect: Allow
+            Principal:
+              Service: kafkaconnect.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: S3ConnectSinkPermissionPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Effect: Allow
+              Action:
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+              Resource:
+              - arn:aws:logs:*:*:/msk-lab-source-aurora-connector/*
+        - PolicyName: MSKConnectAuthentication
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Effect: Allow
+              Action:
+              - kafka-cluster:Connect
+              - kafka-cluster:AlterCluster
+              - kafka-cluster:DescribeCluster
+              - kafka-cluster:DescribeClusterDynamicConfiguration
+              Resource:
+              - !Sub 'arn:aws:kafka:${AWS::Region}:${AWS::AccountId}:cluster/MSKCluster-${AWS::StackName}/*'
+            - Effect: Allow
+              Action:
+              - kafka-cluster:*Topic*
+              - kafka-cluster:WriteData
+              - kafka-cluster:ReadData
+              Resource:
+              - !Sub 'arn:aws:kafka:${AWS::Region}:${AWS::AccountId}:topic/MSKCluster-${AWS::StackName}/*'
+            - Effect: Allow
+              Action:
+              - kafka-cluster:AlterGroup
+              - kafka-cluster:DescribeGroup
+              Resource:
+              - !Sub 'arn:aws:kafka:${AWS::Region}:${AWS::AccountId}:group/MSKCluster-${AWS::StackName}/*'
+
+  S3ConnectorIAMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: ''
+            Effect: Allow
+            Principal:
+              Service: kafkaconnect.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: S3andlogAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Effect: Allow
+              Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+              Resource:
+              - arn:aws:logs:*:*:/msk-lab-target-s3sink-connector/*
+            - Effect: Allow
+              Action:
+              - s3:ListBucket
+              Resource:
+              - !Join
+                - ''
+                - - 'arn:aws:s3:::'
+                  - !Ref S3ConnectorTargetBucket
+            - Effect: Allow
+              Action:
+              - s3:PutObject
+              - s3:GetObject
+              - s3:AbortMultipartUpload
+              - s3:ListMultipartUploadParts
+              - s3:ListBucketMultipartUploads
+              Resource:
+              - !Join
+                - ''
+                - - 'arn:aws:s3:::'
+                  - !Ref S3ConnectorTargetBucket
+                  - /*
+        - PolicyName: MSKConnectAuthentication
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Effect: Allow
+              Action:
+              - kafka-cluster:Connect
+              - kafka-cluster:AlterCluster
+              - kafka-cluster:DescribeCluster
+              - kafka-cluster:DescribeClusterDynamicConfiguration
+              Resource:
+              - !Sub 'arn:aws:kafka:${AWS::Region}:${AWS::AccountId}:cluster/MSKCluster-${AWS::StackName}/*'
+            - Effect: Allow
+              Action:
+              - kafka-cluster:*Topic*
+              - kafka-cluster:WriteData
+              - kafka-cluster:ReadData
+              Resource:
+              - !Sub 'arn:aws:kafka:${AWS::Region}:${AWS::AccountId}:topic/MSKCluster-${AWS::StackName}/*'
+            - Effect: Allow
+              Action:
+              - kafka-cluster:AlterGroup
+              - kafka-cluster:DescribeGroup
+              Resource:
+              - !Sub 'arn:aws:kafka:${AWS::Region}:${AWS::AccountId}:group/MSKCluster-${AWS::StackName}/*'
+  MskCustomConfiguration:
+    Type: AWS::MSK::Configuration
+    Properties:
+      Description: !Sub ${AWS::StackName}-msk-cluster-configuration
+      Name: !Sub ${AWS::StackName}-kafka-configuration
+      KafkaVersionsList:
+        - 2.6.2
+      ServerProperties: |
+        auto.create.topics.enable=true
+  MSKCluster:
+    Type: AWS::MSK::Cluster
+    Properties:
+      ConfigurationInfo:
+        Arn: !GetAtt MskCustomConfiguration.Arn
+        Revision: !GetAtt MskCustomConfiguration.LatestRevision.Revision
+      BrokerNodeGroupInfo:
+        ClientSubnets:
+          - !Ref PrivateSubnetMSKOne
+          - !Ref PrivateSubnetMSKTwo
+          - !Ref PrivateSubnetMSKThree
+        InstanceType: kafka.m5.large
+        SecurityGroups:
+          - !GetAtt MSKSecurityGroup.GroupId
+        StorageInfo:
+          EBSStorageInfo:
+            VolumeSize: 100
+      ClusterName: !Join
+        - '-'
+        - - MSKCluster
+          - !Ref AWS::StackName
+      EncryptionInfo:
+        EncryptionInTransit:
+          ClientBroker: TLS
+          InCluster: true
+      EnhancedMonitoring: DEFAULT
+      KafkaVersion: 2.6.2
+      NumberOfBrokerNodes: 3
+      ClientAuthentication:
+        Sasl:
+          Iam:
+            Enabled: true
+        Unauthenticated:
+          Enabled: false
+  MSKConnectWorkerConfiguration:
+    Type: AWS::KafkaConnect::WorkerConfiguration
+    Properties:
+      Description: MSKConnectWorkerConfiguration
+      Name: !Join
+        - '-'
+        - - MSKConnect-WorkerConfig
+          - !Ref AWS::StackName
+      PropertiesFileContent: !Base64
+        Fn::Sub: |
+          key.converter=org.apache.kafka.connect.storage.StringConverter
+          key.converter.schemas.enable=false
+          value.converter=org.apache.kafka.connect.json.JsonConverter
+          value.converter.schemas.enable=false
+          offset.storage.topic=offsets_blog_debezium_connector
+      Tags:
+        - Key: Name
+          Value: !Ref AWS::StackName
+  MSKConnectDebeziumPlugin:
+    Type: AWS::KafkaConnect::CustomPlugin
+    DependsOn: MSKCluster
+    Properties:
+      ContentType: ZIP
+      Location:
+        S3Location:
+          BucketArn: !GetAtt S3ConnectorPluginsBucket.Arn
+          FileKey: debezium/debezium-connector-mysql-2.0.1.Final-plugin.zip
+      Name: !Join
+        - '-'
+        - - debezium-mysql-plugin
+          - !Ref AWS::StackName
+      Tags:
+        - Key: Name
+          Value: !Ref AWS::StackName
+  MSKConnectS3SinkPlugin:
+    Type: AWS::KafkaConnect::CustomPlugin
+    DependsOn: MSKCluster
+    Properties:
+      ContentType: ZIP
+      Location:
+        S3Location:
+          BucketArn: !GetAtt S3ConnectorPluginsBucket.Arn
+          FileKey: kafka-connect-s3/confluentinc-kafka-connect-s3-10.0.3.zip
+      Name: !Join
+        - '-'
+        - - confluent-s3-plugin
+          - !Ref AWS::StackName
+      Tags:
+        - Key: Name
+          Value: !Ref AWS::StackName
+  MSKConnectDebeziumConnector:
+    Type: AWS::KafkaConnect::Connector
+    DependsOn: MSKConnectDebeziumPlugin
+    Properties:
+      Capacity:
+        AutoScaling:
+          MaxWorkerCount: 2
+          McuCount: 1
+          MinWorkerCount: 1
+          ScaleInPolicy:
+            CpuUtilizationPercentage: 20
+          ScaleOutPolicy:
+            CpuUtilizationPercentage: 80
+      ConnectorConfiguration:
+        connector.class: io.debezium.connector.mysql.MySqlConnector
+        tasks.max: 1
+        include.schema.changes: true
+        topic.prefix: blog
+        value.converter: org.apache.kafka.connect.json.JsonConverter
+        key.converter: org.apache.kafka.connect.storage.StringConverter
+        database.user: master
+        database.server.id: 123456
+        database.server.name: salesdb
+        database.port: 3306
+        key.converter.schemas.enable: false
+        database.hostname: !GetAtt BootstrapBrokers.DBInstanceEndpoint
+        database.password: !Ref DatabasePassword
+        value.converter.schemas.enable: false
+        database.include.list: salesdb
+        schema.history.internal.kafka.topic: internal.dbhistory.salesdb
+        schema.history.internal.kafka.bootstrap.servers: !GetAtt BootstrapBrokers.BootstrapBrokerStringSaslIam
+        schema.history.internal.producer.sasl.mechanism: AWS_MSK_IAM
+        schema.history.internal.consumer.sasl.mechanism: AWS_MSK_IAM
+        schema.history.internal.producer.sasl.jaas.config: software.amazon.msk.auth.iam.IAMLoginModule required;
+        schema.history.internal.consumer.sasl.jaas.config: software.amazon.msk.auth.iam.IAMLoginModule required;
+        schema.history.internal.producer.sasl.client.callback.handler.class: software.amazon.msk.auth.iam.IAMClientCallbackHandler
+        schema.history.internal.consumer.sasl.client.callback.handler.class: software.amazon.msk.auth.iam.IAMClientCallbackHandler
+        schema.history.internal.consumer.security.protocol: SASL_SSL
+        schema.history.internal.producer.security.protocol: SASL_SSL
+        transforms: unwrap
+        transforms.unwrap.type: io.debezium.transforms.ExtractNewRecordState
+        transforms.unwrap.drop.tombstones: false
+        transforms.unwrap.delete.handling.mode: rewrite
+        transforms.unwrap.add.fields: op,source.ts_ms
+      ConnectorDescription: MSK Connect Debezium Connector
+      ConnectorName: !Join
+        - '-'
+        - - MSKConnectDebeziumConnector
+          - !Ref AWS::StackName
+      KafkaCluster:
+        ApacheKafkaCluster:
+          BootstrapServers: !GetAtt BootstrapBrokers.BootstrapBrokerStringSaslIam
+          Vpc:
+            SecurityGroups:
+              - !GetAtt MSKSecurityGroup.GroupId
+            Subnets:
+              - !Ref PrivateSubnetMSKOne
+              - !Ref PrivateSubnetMSKTwo
+              - !Ref PrivateSubnetMSKThree
+      KafkaClusterClientAuthentication:
+        AuthenticationType: IAM
+      KafkaClusterEncryptionInTransit:
+        EncryptionType: TLS
+      KafkaConnectVersion: 2.7.1
+      LogDelivery:
+        WorkerLogDelivery:
+          CloudWatchLogs:
+            Enabled: 'True'
+            LogGroup: /msk-lab-source-aurora-connector
+      Plugins:
+        - CustomPlugin:
+            CustomPluginArn: !GetAtt MSKConnectDebeziumPlugin.CustomPluginArn
+            Revision: !GetAtt MSKConnectDebeziumPlugin.Revision
+      ServiceExecutionRoleArn: !GetAtt AuroraConnectorIAMRole.Arn
+      Tags:
+        - Key: Name
+          Value: !Ref AWS::StackName
+      WorkerConfiguration:
+        Revision: !GetAtt MSKConnectWorkerConfiguration.Revision
+        WorkerConfigurationArn: !GetAtt MSKConnectWorkerConfiguration.WorkerConfigurationArn
+  MSKConnectS3SinkConnector:
+    Type: AWS::KafkaConnect::Connector
+    DependsOn: MSKConnectDebeziumConnector
+    Properties:
+      Capacity:
+        AutoScaling:
+          MaxWorkerCount: 2
+          McuCount: 1
+          MinWorkerCount: 1
+          ScaleInPolicy:
+            CpuUtilizationPercentage: 20
+          ScaleOutPolicy:
+            CpuUtilizationPercentage: 80
+      ConnectorConfiguration:
+        connector.class: io.confluent.connect.s3.S3SinkConnector
+        s3.region: !Ref AWS::Region
+        timezone: UTC
+        flush.size: 10
+        behavior.on.null.values: ignore
+        rotate.schedule.interval.ms: 10000
+        schema.compatibility: NONE
+        tasks.max: 1
+        topics: blog.salesdb.CUSTOMER
+        value.converter.schemas.enable: false
+        format.class: io.confluent.connect.s3.format.json.JsonFormat
+        partitioner.class: io.confluent.connect.storage.partitioner.DefaultPartitioner
+        key.converter: org.apache.kafka.connect.storage.StringConverter
+        value.converter: org.apache.kafka.connect.json.JsonConverter
+        storage.class: io.confluent.connect.s3.storage.S3Storage
+        s3.bucket.name: !Ref S3ConnectorTargetBucket
+      ConnectorDescription: MSK Connect S3 Sink Connector
+      ConnectorName: !Join
+        - '-'
+        - - MSKConnectS3SinkConnector
+          - !Ref AWS::StackName
+      KafkaCluster:
+        ApacheKafkaCluster:
+          BootstrapServers: !GetAtt BootstrapBrokers.BootstrapBrokerStringSaslIam
+          Vpc:
+            SecurityGroups:
+              - !GetAtt MSKSecurityGroup.GroupId
+            Subnets:
+              - !Ref PrivateSubnetMSKOne
+              - !Ref PrivateSubnetMSKTwo
+              - !Ref PrivateSubnetMSKThree
+      KafkaClusterClientAuthentication:
+        AuthenticationType: IAM
+      KafkaClusterEncryptionInTransit:
+        EncryptionType: TLS
+      KafkaConnectVersion: 2.7.1
+      LogDelivery:
+        WorkerLogDelivery:
+          CloudWatchLogs:
+            Enabled: 'True'
+            LogGroup: /msk-lab-target-s3sink-connector
+      Plugins:
+        - CustomPlugin:
+            CustomPluginArn: !GetAtt MSKConnectS3SinkPlugin.CustomPluginArn
+            Revision: !GetAtt MSKConnectS3SinkPlugin.Revision
+      ServiceExecutionRoleArn: !GetAtt S3ConnectorIAMRole.Arn
+      Tags:
+        - Key: Name
+          Value: !Ref AWS::StackName
+      WorkerConfiguration:
+        Revision: !GetAtt MSKConnectWorkerConfiguration.Revision
+        WorkerConfigurationArn: !GetAtt MSKConnectWorkerConfiguration.WorkerConfigurationArn
+  DatabaseSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: CloudFormation managed DB subnet group.
+      SubnetIds:
+        - !Ref PublicSubnetOne
+        - !Ref PublicSubnetTwo
+  AuroraDBParameterGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Description: MSK Blog DB parameter group
+      Family: aurora-mysql8.0
+      Parameters:
+        max_connections: 300
+  AuroraDBClusterParameterGroup:
+    Type: AWS::RDS::DBClusterParameterGroup
+    Properties:
+      Description: CloudFormation Sample Aurora Cluster Parameter Group
+      Family: aurora-mysql8.0
+      Parameters:
+        time_zone: US/Eastern
+        binlog_format: ROW
+        binlog_checksum: NONE
+  AuroraCluster:
+    Type: AWS::RDS::DBCluster
+    DependsOn:
+      - DatabaseSubnetGroup
+    Properties:
+      Engine: aurora-mysql
+      EngineVersion: 8.0.mysql_aurora.3.05.2
+      StorageEncrypted: true
+      MasterUsername: master
+      MasterUserPassword: !Ref DatabasePassword
+      DatabaseName: salesdb
+      DBSubnetGroupName: !Ref DatabaseSubnetGroup
+      DBClusterParameterGroupName: !Ref AuroraDBClusterParameterGroup
+      VpcSecurityGroupIds:
+        - !Ref AuroraDBSecurityGroup
+  AuroraDB:
+    Type: AWS::RDS::DBInstance
+    DependsOn: AuroraCluster
+    Properties:
+      Engine: aurora-mysql
+      DBClusterIdentifier: !Ref AuroraCluster
+      DBInstanceClass: db.r5.large
+      DBSubnetGroupName: !Ref DatabaseSubnetGroup
+      DBParameterGroupName: !Ref AuroraDBParameterGroup
+      PubliclyAccessible: 'false'
+      DBInstanceIdentifier: !Join
+        - '-'
+        - - blog-msk
+          - salesdb
+      Tags:
+        - Key: Name
+          Value: !Ref AWS::StackName
+  BootstrapBrokersFunctionExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub glue-msk-getbroker-role-${EnvironmentName}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /service-role/
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonRDSReadOnlyAccess
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: !Sub cfn-msk-msk-brokers-policy-${EnvironmentName}
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kafka:GetBootstrapBrokers
+                Resource: !Ref MSKCluster
+        - PolicyName: !Sub cfn-msk-s3-${EnvironmentName}
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:Get*
+                  - s3:PutObject*
+                  - s3:List*
+                Resource:
+                  - !Join
+                    - ''
+                    - - 'arn:aws:s3:::'
+                      - !Ref S3ConnectorPluginsBucket
+                  - !Join
+                    - ''
+                    - - 'arn:aws:s3:::'
+                      - !Ref S3ConnectorPluginsBucket
+                      - /*
+      Tags:
+        - Key: AppName
+          Value: !Sub ${EnvironmentName}-${AWS::StackName}
+  BootstrapBrokersFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: |
+          import json
+          import logging
+          import cfnresponse
+          import boto3
+          session = boto3.session.Session()
+          client = session.client('kafka')
+          s3client = boto3.client('s3')
+          rdsclient = boto3.client('rds')
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+          def lambda_handler(event, context):
+            logger.info(event)
+            responseStatus = cfnresponse.FAILED
+            responseData = {}
+            ClusterArn = event['ResourceProperties'].get('ClusterArn')
+            if ClusterArn:
+              try:
+                ClusterArn = event['ResourceProperties']['ClusterArn']
+                response = client.get_bootstrap_brokers(ClusterArn=ClusterArn)
+                logger.info(response)
+                if (response['ResponseMetadata']['HTTPStatusCode'] == 200):
+                    responseStatus = cfnresponse.SUCCESS
+                    responseData['BootstrapBrokerStringSaslIam'] = response['BootstrapBrokerStringSaslIam']
+              except Exception:
+                logger.exception('Signaling failure to CloudFormation.')
+            rdsDBInstanceIdentifier = event['ResourceProperties'].get('rdsDBInstanceIdentifier')
+            if rdsDBInstanceIdentifier:
+              try:
+                DBInstanceIdentifier = event['ResourceProperties']['rdsDBInstanceIdentifier']
+                responserds = rdsclient.describe_db_instances(DBInstanceIdentifier=DBInstanceIdentifier)
+                logger.info(responserds)
+                if (responserds['ResponseMetadata']['HTTPStatusCode'] == 200):
+                    responseStatus = cfnresponse.SUCCESS
+                    responseData['DBInstanceEndpoint'] = responserds["DBInstances"][0]["Endpoint"]["Address"]
+              except Exception:
+                logger.exception('Signaling failure to CloudFormation.')
+            cfnresponse.send(event, context, responseStatus, responseData)
+            return
+      FunctionName: !Sub cfn-msk-bootstrap-brokers-${EnvironmentName}
+      Handler: index.lambda_handler
+      Role: !GetAtt BootstrapBrokersFunctionExecutionRole.Arn
+      Runtime: python3.12
+      Timeout: 30
+  BootstrapBrokers:
+    Type: Custom::Function
+    DependsOn: MSKCluster
+    Properties:
+      ServiceToken: !GetAtt BootstrapBrokersFunction.Arn
+      ClusterArn: !Ref MSKCluster
+      rdsDBInstanceIdentifier: blog-msk-salesdb
+  S3CleanupFunctionExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub blog-s3cleanup-role-${EnvironmentName}
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /service-role/
+      Policies:
+        - PolicyName: !Sub cfn-msk-msk-s3cleanup-${EnvironmentName}
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - iam:ListAttachedRolePolicies
+                  - iam:DetachRolePolicy
+                Resource:
+                  - !GetAtt EC2Role.Arn
+              - Effect: Allow
+                Action:
+                  - s3:Get*
+                  - s3:Delete*
+                  - s3:List*
+                Resource:
+                  - !Join
+                    - ''
+                    - - 'arn:aws:s3:::'
+                      - !Ref S3ConnectorTargetBucket
+                  - !Join
+                    - ''
+                    - - 'arn:aws:s3:::'
+                      - !Ref S3ConnectorTargetBucket
+                      - /*
+                  - !Join
+                    - ''
+                    - - 'arn:aws:s3:::'
+                      - !Ref S3ConnectorPluginsBucket
+                  - !Join
+                    - ''
+                    - - 'arn:aws:s3:::'
+                      - !Ref S3ConnectorPluginsBucket
+                      - /*
+                  - !Join
+                    - ''
+                    - - 'arn:aws:s3:::'
+                      - !Ref S3BucketOutputBlog
+                  - !Join
+                    - ''
+                    - - 'arn:aws:s3:::'
+                      - !Ref S3BucketOutputBlog
+                      - /*
+                  - !Join
+                    - ''
+                    - - 'arn:aws:s3:::'
+                      - !Ref S3BucketInputBlog
+                  - !Join
+                    - ''
+                    - - 'arn:aws:s3:::'
+                      - !Ref S3BucketInputBlog
+                      - /*
+      Tags:
+        - Key: AppName
+          Value: !Sub ${EnvironmentName}-${AWS::StackName}
+  CleanupResourcesOnDeletion:
+    Type: AWS::Lambda::Function
+    DependsOn: BootstrapBrokersFunction
+    Properties:
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import logging
+          import cfnresponse
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+          def lambda_handler(event, context):
+            logger.info(event)
+            responseStatus = cfnresponse.SUCCESS
+            responseData = {}
+            iam_role = event['ResourceProperties'].get('IamRole')
+            bucket = event['ResourceProperties'].get('BucketName')
+            if bucket and event['RequestType'] == 'Delete':
+              try:
+                  s3 = boto3.resource('s3')
+                  bucket = s3.Bucket(bucket)
+                  for obj in bucket.objects.filter():
+                      s3.Object(bucket.name, obj.key).delete()
+                  responseStatus = cfnresponse.SUCCESS
+              except Exception as e:
+                  logger.exception(e)
+                  responseStatus = cfnresponse.FAILED
+            if iam_role and event['RequestType'] == 'Delete':
+              try:
+                iam = boto3.client('iam')
+                attached_policies = iam.list_attached_role_policies(RoleName=iam_role)
+                for policy in attached_policies['AttachedPolicies']:
+                  iam.detach_role_policy(RoleName=iam_role, PolicyArn=policy['PolicyArn'])
+                responseStatus = cfnresponse.SUCCESS
+              except Exception as e:
+                logger.exception(e)
+                responseStatus = cfnresponse.FAILED
+            cfnresponse.send(event, context, responseStatus, responseData)
+            return
+      FunctionName: !Sub cfn-delete-resources-${EnvironmentName}
+      Handler: index.lambda_handler
+      Role: !GetAtt S3CleanupFunctionExecutionRole.Arn
+      Runtime: python3.12
+      Timeout: 30
+  CleanupS3OutputBucketOnDelete:
+    Type: Custom::cleanups3bucket
+    Properties:
+      ServiceToken: !GetAtt CleanupResourcesOnDeletion.Arn
+      BucketName: !Ref S3ConnectorTargetBucket
+  CleanupS3BucketOnDelete:
+    Type: Custom::cleanups3bucket
+    Properties:
+      ServiceToken: !GetAtt CleanupResourcesOnDeletion.Arn
+      BucketName: !Ref S3ConnectorPluginsBucket
+  CleanupS3GlueOutputBucketOnDelete:
+    Type: Custom::cleanups3bucket
+    Properties:
+      ServiceToken: !GetAtt CleanupResourcesOnDeletion.Arn
+      BucketName: !Ref S3BucketOutputBlog
+  CleanupS3InputBucketOnDelete:
+    Type: Custom::cleanups3bucket
+    Properties:
+      ServiceToken: !GetAtt CleanupResourcesOnDeletion.Arn
+      BucketName: !Ref S3BucketInputBlog
+  DeattachIamPolicy:
+    Type: Custom::deatchpolicy
+    Properties:
+      ServiceToken: !GetAtt CleanupResourcesOnDeletion.Arn
+      IamRole: !Ref EC2Role
+Outputs:
+  VPCId:
+    Description: The ID of the VPC created
+    Value: !Ref VPC
+  PublicSubnets:
+    Description: A list of the public subnets
+    Value: !Join
+      - ','
+      - - !Ref PublicSubnetOne
+  PrivateSubnets:
+    Description: A list of the private subnets
+    Value: !Join
+      - ','
+      - - !Ref PrivateSubnetMSKOne
+        - !Ref PrivateSubnetMSKTwo
+        - !Ref PrivateSubnetMSKThree
+  MSKSecurityGroupID:
+    Description: The ID of the security group created for the MSK clusters
+    Value: !GetAtt MSKSecurityGroup.GroupId
+  KafkaClientEC2InstancePublicDNS:
+    Description: The Public DNS for the EC2 instance
+    Value: !GetAtt KafkaClientEC2Instance.PublicDnsName
+  S3ConnectorPluginsBucketName:
+    Description: The S3 Bucket for storing the MSK Connect Custom Plugins
+    Value: !Ref S3ConnectorPluginsBucket
+  S3ConnectorTargetBucketName:
+    Description: The S3 Bucket for storing the MSK sink data connectors
+    Value: !Ref S3ConnectorTargetBucket
+  MSKClusterArn:
+    Description: The Arn for the MSKMMCluster1 MSK cluster
+    Value: !Ref MSKCluster
+  KafkaClientEC2InstanceSecurityGroupId:
+    Description: The security group id for the EC2 instance
+    Value: !GetAtt KafkaClientInstanceSecurityGroup.GroupId
+  MSKBootstrapServers:
+    Description: MSK cluster Bootstrap Servers string.
+    Value: !GetAtt BootstrapBrokers.BootstrapBrokerStringSaslIam
+  S3BucketForOutput:
+    Value: !Ref S3BucketOutputBlog
+    Description: S3 bucket name for Glue jobrun output files.
+  S3BucketForGlueScript:
+    Value: !Ref S3BucketInputBlog
+    Description: S3 bucket name for Glue jobrun script files.

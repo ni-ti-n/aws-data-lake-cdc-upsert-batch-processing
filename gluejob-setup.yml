@@ -1,0 +1,158 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
+AWSTemplateFormatVersion: 2010-09-09
+
+Description: This template creates the AWS Glue resources such as database,
+  table, connection, Glue job etc. for Stream consumer application.
+
+Parameters:
+  EnvironmentName:
+    Description: An environment name that is prefixed to resource names
+    Type: String
+  S3BucketForGlueScript:
+    Description: 'Bucket name for Glue ETL script, Only provide the bucket name without s3://prefix eg: aws-gluescript. Retrieve name from vpc-msk-mskconnect-rds-client stack output'
+    Type: String
+  S3ConnectorTargetBucketName:
+    Description: 'Bucket name for MSK target contains CDC data, Only provide the bucket name without s3://prefix eg: msk-lab-<account-id>-target-bucket. Retrieve name from vpc-msk-mskconnect-rds-client stack output'
+    Type: String
+  GlueDatabaseName:
+    Description: Database name on Glue catalog. Create new Database in catalog
+    Type: String
+    Default: glue_cdc_blog_db
+  GlueTableName:
+    Description: Table name on Glue catalog. Create new table in catalog.
+    Type: String
+    Default: blog_cdc_tbl
+  GlueWorkerType:
+    Description: Worker type for Glue job
+    Type: String
+    Default: G.1X
+    AllowedValues:
+      - G.1X
+      - G.2X
+      - G.4X
+      - G.8X
+    ConstraintDescription: must be a valid Glue Worker type.
+  NumberOfWorkers:
+    Description: Number of workers in Glue job
+    Type: Number
+    Default: 3
+    MinValue: 3
+  S3BucketForOutput:
+    Description: 'Bucket name for writing data from Glue Job. Only provide the bucket name without s3://prefix eg: aws-glueoutput. Retrieve name from vpc-msk-mskconnect-rds-client stack output'
+    Type: String
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: General Parameters
+        Parameters:
+          - EnvironmentName
+
+      - Label:
+          default: AWS Glue Catalog Parameters
+        Parameters:
+          - GlueDatabaseName
+      - Label:
+          default: AWS Glue Jobs Parameters
+        Parameters:
+          - S3BucketForGlueScript
+          - GlueWorkerType
+          - NumberOfWorkers
+          - S3BucketForOutput
+
+Resources:
+
+  GlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: !Ref GlueDatabaseName
+        LocationUri: !Sub s3://${S3BucketForOutput}/
+
+  GlueIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub Glue-ServiceRole-${EnvironmentName}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - glue.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+      Policies:
+        - PolicyName: !Sub s3access-${EnvironmentName}
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject*
+                  - s3:ListBucket
+                  - s3:GetObject*
+                  - s3:DeleteObject*
+                Resource:
+                  - !Sub arn:aws:s3:::${S3BucketForGlueScript}
+                  - !Sub arn:aws:s3:::${S3BucketForGlueScript}/*
+                  - !Sub arn:aws:s3:::${S3BucketForOutput}
+                  - !Sub arn:aws:s3:::${S3BucketForOutput}/*
+                  - !Sub arn:aws:s3:::${S3ConnectorTargetBucketName}
+                  - !Sub arn:aws:s3:::${S3ConnectorTargetBucketName}/*
+
+  GlueCDCJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: !Sub GlueCDCJob-${EnvironmentName}
+      Command:
+        Name: glueetl
+        ScriptLocation: !Sub s3://${S3BucketForGlueScript}/gluejobscript/mskdebeziumcdcglueetl.py
+        PythonVersion: '3'
+      Description: Glue job to process CDC data
+      ExecutionProperty:
+        MaxConcurrentRuns: 1
+      GlueVersion: '4.0'
+      WorkerType: !Ref GlueWorkerType
+      NumberOfWorkers: !Ref NumberOfWorkers
+      DefaultArguments:
+        '--enable-continuous-cloudwatch-log': 'true'
+        '--enable-job-insights': 'true'
+        '--enable-metrics': 'true'
+        '--enable-spark-ui': 'true'
+        '--job-bookmark-option': job-bookmark-enable
+        '--enable-glue-datacatalog': 'true'
+        '--spark-event-logs-path': !Sub s3://${S3BucketForGlueScript}/eventlogs/
+        '--database_name': !Ref GlueDatabase
+        '--table_name': !Ref GlueTableName
+        '--input_dir': !Sub s3://${S3ConnectorTargetBucketName}/
+        '--dest_dir': !Sub s3://${S3BucketForOutput}/
+        '--datalake-formats': delta
+        '--conf': spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension --conf
+          spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog
+          --conf
+          spark.delta.logStore.class=org.apache.spark.sql.delta.storage.S3SingleDriverLogStore
+      Role: !Ref GlueIamRole
+      Tags:
+        AppName: !Sub ${EnvironmentName}-${AWS::StackName}
+
+Outputs:
+  GlueJobName:
+    Description: Glue job name
+    Value: !Ref GlueCDCJob
+  GlueDatabase:
+    Description: Glue database name
+    Value: !Ref GlueDatabase
+  OutputBucketName:
+    Value: !Ref S3BucketForOutput
+    Description: Name of the Amazon S3 bucket used to write Glue Streaming job output.
+  GlueJobIAMRole:
+    Value: !Ref GlueIamRole
+    Description: IAM Role ARN for Glue job.
